@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+httpx
+pydantic
+python-dotenv
+openai
+langchain
+langchain-openai
+langchain-community
+langchain-text-splitters
+redis
+pymongo
+mcp==1.9.4
+google-search-results
+langchain-qdrant
+qdrant-client
+pypdf

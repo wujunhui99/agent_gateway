@@ -1,0 +1,118 @@
+{
+  "baseline": [
+    {
+      "name": "Baseline - simple_calc",
+      "avg_time_ms": 235.9301967266947,
+      "median_time_ms": 223.21154150995426,
+      "p95_time_ms": 266.6004999773577,
+      "p99_time_ms": 466.71479201177135,
+      "throughput": 4.238381434333793
+    },
+    {
+      "name": "Baseline - loop_calc",
+      "avg_time_ms": 238.27220966340974,
+      "median_time_ms": 224.41416649962775,
+      "p95_time_ms": 297.7297499892302,
+      "p99_time_ms": 542.6936660078354,
+      "throughput": 4.1967325887664435
+    },
+    {
+      "name": "Baseline - string_ops",
+      "avg_time_ms": 246.24627629915875,
+      "median_time_ms": 228.19629148580134,
+      "p95_time_ms": 407.4863329879008,
+      "p99_time_ms": 506.63637497927994,
+      "throughput": 4.060836359769618
+    },
+    {
+      "name": "Baseline - list_comp",
+      "avg_time_ms": 244.17316666222177,
+      "median_time_ms": 221.84370848117396,
+      "p95_time_ms": 360.14358297688887,
+      "p99_time_ms": 601.6375410254113,
+      "throughput": 4.09535119754508
+    },
+    {
+      "name": "Baseline - dict_ops",
+      "avg_time_ms": 274.3008416320663,
+      "median_time_ms": 245.39445800473914,
+      "p95_time_ms": 474.4358750176616,
+      "p99_time_ms": 604.2598750209436,
+      "throughput": 3.6454884043180025
+    },
+    {
+      "name": "Baseline - json_parsing",
+      "avg_time_ms": 242.51501803325178,
+      "median_time_ms": 229.90081252646632,
+      "p95_time_ms": 302.7753750211559,
+      "p99_time_ms": 505.6852080160752,
+      "throughput": 4.123322151300102
+    },
+    {
+      "name": "Baseline - mixed_workload",
+      "avg_time_ms": 251.50058339932002,
+      "median_time_ms": 226.22781252721325,
+      "p95_time_ms": 331.5765419974923,
+      "p99_time_ms": 984.9044589791447,
+      "throughput": 3.976023109532797
+    }
+  ],
+  "optimized": [
+    {
+      "name": "Optimized - simple_calc",
+      "avg_time_ms": 0.4868173855356872,
+      "median_time_ms": 0.47770849778316915,
+      "p95_time_ms": 0.5994579987600446,
+      "p99_time_ms": 0.6292500183917582,
+      "throughput": 2047.7850665045196
+    },
+    {
+      "name": "Optimized - loop_calc",
+      "avg_time_ms": 0.47937919929002726,
+      "median_time_ms": 0.4738334973808378,
+      "p95_time_ms": 0.5618750001303852,
+      "p99_time_ms": 0.6211670115590096,
+      "throughput": 2079.7346706438457
+    },
+    {
+      "name": "Optimized - string_ops",
+      "avg_time_ms": 0.650776441519459,
+      "median_time_ms": 0.6143960054032505,
+      "p95_time_ms": 1.0339580476284027,
+      "p99_time_ms": 1.0638750391080976,
+      "throughput": 1532.9749057235563
+    },
+    {
+      "name": "Optimized - list_comp",
+      "avg_time_ms": 0.516536133363843,
+      "median_time_ms": 0.4971875168848783,
+      "p95_time_ms": 0.6478750146925449,
+      "p99_time_ms": 0.6860419525764883,
+      "throughput": 1931.387464457928
+    },
+    {
+      "name": "Optimized - dict_ops",
+      "avg_time_ms": 0.5323264980688691,
+      "median_time_ms": 0.5259794997982681,
+      "p95_time_ms": 0.6657500052824616,
+      "p99_time_ms": 0.708709005266428,
+      "throughput": 1873.136695513555
+    },
+    {
+      "name": "Optimized - json_parsing",
+      "avg_time_ms": 0.4723277311616888,
+      "median_time_ms": 0.46872900566086173,
+      "p95_time_ms": 0.5419999943114817,
+      "p99_time_ms": 0.5740420310758054,
+      "throughput": 2112.508690063719
+    },
+    {
+      "name": "Optimized - mixed_workload",
+      "avg_time_ms": 0.545312559697777,
+      "median_time_ms": 0.5083755240775645,
+      "p95_time_ms": 0.7936669862829149,
+      "p99_time_ms": 0.9336670045740902,
+      "throughput": 1829.4049849693324
+    }
+  ]
+}

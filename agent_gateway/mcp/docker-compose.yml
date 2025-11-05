@@ -1,0 +1,12 @@
+services:
+  mcp-python-tool:
+    image: python:3.11-slim
+    working_dir: /app
+    volumes:
+      - ./tools:/app/tools:ro
+      - ./scripts:/app/scripts:ro
+    entrypoint: ["/bin/bash", "-c"]
+    command: ["sleep infinity"]
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
+    network_mode: none

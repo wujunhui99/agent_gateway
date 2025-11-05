@@ -1,0 +1,45 @@
+version: "3.9"
+services:
+  mongo:
+    image: mongo:7.0
+    container_name: agent-gateway-mongo
+    restart: always
+    ports:
+      - "47017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: rootpass
+    volumes:
+      - mongo_data:/data/db
+
+  # agent_gateway:
+  #   build: .
+  #   container_name: agent-gateway
+  #   restart: always
+  #   ports:
+  #     - "8081:8081"
+  #   environment:
+  #     AGENT_GATEWAY_OPENIM_API_BASE: "http://openim-server:10002"
+  #     AGENT_GATEWAY_OPENIM_ADMIN_USER_ID: "imAdmin"
+  #     AGENT_GATEWAY_OPENIM_ADMIN_SECRET: "openIM123"
+  #     AGENT_GATEWAY_AGENT_USER_PREFIX: "bot_"
+  #     AGENT_GATEWAY_REDIS_URL: "redis://redis:6379/0"
+  #     AGENT_GATEWAY_MONGO_URI: "mongodb://root:rootpass@mongo:27017"
+  #     AGENT_GATEWAY_MONGO_DB: "agent_gateway"
+  #     AGENT_GATEWAY_MONGO_AGENT_COLLECTION: "agents"
+  #   depends_on:
+  #     - mongo
+  #     - redis
+
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: agent-gateway-redis
+  #   restart: always
+  #   ports:
+  #     - "6379:6379"
+  #   volumes:
+  #     - redis_data:/data
+
+volumes:
+  mongo_data:
+  # redis_data:

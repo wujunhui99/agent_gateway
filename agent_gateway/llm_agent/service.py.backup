@@ -1,0 +1,176 @@
+from __future__ import annotations
+
+import json
+import logging
+import threading
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List, Optional, Sequence
+
+from langchain_classic.agents import create_tool_calling_agent, AgentExecutor
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_community.chat_message_histories import RedisChatMessageHistory
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.tools import StructuredTool
+from langchain_openai import ChatOpenAI
+
+
+@dataclass
+class LLMConfig:
+    api_base: str
+    api_key: str
+    model: str
+    system_prompt: str
+    memory_size: int
+    redis_url: Optional[str] = None
+    tools: Optional[Sequence[StructuredTool]] = None
+    tool_iteration_limit: int = 3
+
+
+class LLMAgentService:
+    """Composable LangChain-based chat agent with Redis-backed memory."""
+
+    def __init__(self, config: LLMConfig) -> None:
+        self._config = config
+        self._client = ChatOpenAI(
+            model=config.model,
+            openai_api_key=config.api_key,
+            openai_api_base=config.api_base,
+        )
+        self._tools: Dict[str, StructuredTool] = {tool.name: tool for tool in config.tools or []}
+        self._agent_executor = self._build_react_agent(self._tools) if self._tools else None
+        self._histories: Dict[str, RedisChatMessageHistory] = {}
+        self._lock = threading.Lock()
+
+    def generate_reply(self, session_key: str, message: str) -> str:
+        if not message:
+            return ""
+
+        history = self._get_history(session_key)
+        if self._config.memory_size <= 0:
+            history.clear()
+
+        messages = self._build_prompt(history.messages, message)
+
+        if self._agent_executor:
+            reply = self._invoke_react_agent(history.messages, message)
+        else:
+            response = self._client.invoke(messages)
+            reply = response.content.strip()
+
+        history.add_user_message(message)
+        history.add_ai_message(reply)
+        self._maybe_summarize_history(history)
+
+        return reply
+
+    def _build_prompt(self, stored_messages: Iterable[BaseMessage], new_message: str) -> List[BaseMessage]:
+        prompt: List[BaseMessage] = [SystemMessage(content=self._config.system_prompt)]
+        prompt.extend(self._build_history_messages(stored_messages))
+        prompt.append(HumanMessage(content=new_message))
+        return prompt
+
+    def _build_history_messages(self, stored_messages: Iterable[BaseMessage]) -> List[BaseMessage]:
+        stored_list = list(stored_messages)
+        summaries = [msg for msg in stored_list if isinstance(msg, SystemMessage)]
+        dialog_messages = [msg for msg in stored_list if not isinstance(msg, SystemMessage)]
+        limit = max(self._config.memory_size * 2, 2)
+        return summaries + dialog_messages[-limit:]
+
+    def _get_history(self, session_key: str) -> RedisChatMessageHistory:
+        if session_key in self._histories:
+            return self._histories[session_key]
+
+        if not self._config.redis_url:
+            raise RuntimeError("Redis URL not configured for LLM agent")
+
+        with self._lock:
+            history = self._histories.get(session_key)
+            if history is None:
+                history = RedisChatMessageHistory(url=self._config.redis_url, session_id=session_key)
+                self._histories[session_key] = history
+            return history
+
+    def _build_react_agent(self, tools: Dict[str, StructuredTool]) -> AgentExecutor:
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", "{system_prompt}"),
+                MessagesPlaceholder(variable_name="chat_history"),
+                ("human", "{input}"),
+                MessagesPlaceholder(variable_name="agent_scratchpad"),
+            ]
+        )
+        agent = create_tool_calling_agent(self._client, list(tools.values()), prompt)
+        import os
+        verbose = os.getenv("AGENT_VERBOSE", "false").lower() == "true"
+        return AgentExecutor(agent=agent, tools=list(tools.values()), verbose=verbose)
+
+    def _invoke_react_agent(self, stored_messages: Iterable[BaseMessage], new_message: str) -> str:
+        history_messages = self._build_history_messages(stored_messages)
+        result = self._agent_executor.invoke(
+            {
+                "system_prompt": self._config.system_prompt,
+                "chat_history": history_messages,
+                "input": new_message,
+            }
+        )
+        if isinstance(result, dict):
+            output = result.get("output") or ""
+        else:
+            output = str(result)
+        return output.strip()
+
+    def _maybe_summarize_history(self, history: RedisChatMessageHistory) -> None:
+        if self._config.memory_size <= 0:
+            history.clear()
+            return
+
+        messages = list(history.messages)
+        # Ignore system summaries when checking raw exchanges.
+        dialog_messages = [msg for msg in messages if not isinstance(msg, SystemMessage)]
+        limit = max(self._config.memory_size * 2, 0)
+        if len(dialog_messages) <= limit:
+            return
+
+        summary_prompt = [
+            SystemMessage(
+                content=(
+                    "You are an assistant that summarizes chat history. "
+                    "Capture key facts, preferences, tasks, and conversation context in under 200 words."
+                )
+            ),
+            HumanMessage(content=self._format_messages_for_summary(messages)),
+        ]
+
+        try:
+            summary_result = self._client.invoke(summary_prompt)
+        except Exception as exc:  # noqa: BLE001
+            logging.warning("Failed to summarize history: %s", exc)
+            return
+
+        summary_text = summary_result.content.strip()
+        if not summary_text:
+            return
+
+        try:
+            history.clear()
+            history.add_message(SystemMessage(content=f"Summary: {summary_text}"))
+        except Exception as exc:  # noqa: BLE001
+            logging.warning("Failed to store summarized history: %s", exc)
+
+    def _format_messages_for_summary(self, messages: Iterable[BaseMessage]) -> str:
+        lines: List[str] = []
+        for msg in messages:
+            role = self._resolve_role(msg)
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            lines.append(f"{role}: {content}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _resolve_role(message: BaseMessage) -> str:
+        if isinstance(message, HumanMessage):
+            return "User"
+        if isinstance(message, AIMessage):
+            return "Assistant"
+        if isinstance(message, SystemMessage):
+            return "System"
+        return message.type.capitalize()
