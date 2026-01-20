@@ -23,7 +23,12 @@ async def create_agent_entry(
     agent_tools: Dict[str, Any],
     rag_store: Optional[RAGStore] = None,
 ) -> Dict[str, Any]:
-    request = CreateAgentInput(**payload)
+    raw_friends = payload.get("friends") or []
+    if isinstance(raw_friends, str):
+        raw_friends = [raw_friends]
+
+    payload_without_friends = {key: value for key, value in payload.items() if key != "friends"}
+    request = CreateAgentInput(**payload_without_friends)
 
     if settings.agent_user_prefix and not request.bot_user_id.startswith(settings.agent_user_prefix):
         raise HTTPException(
@@ -35,7 +40,16 @@ async def create_agent_entry(
     if not request.name.strip():
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="name is required")
 
-    friend_ids = _clean_friends(request.friends, request.bot_user_id)
+    # Get LLM provider configuration
+    provider_config = settings.get_llm_provider(request.provider)
+    if not provider_config:
+        available_providers = list(settings.llm_providers.keys())
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail=f"Unknown provider '{request.provider}'. Available providers: {available_providers}",
+        )
+
+    friend_ids = _clean_friends(raw_friends, request.bot_user_id)
     redis_url = request.redis_url or settings.redis_url
     if request.enabled and not redis_url:
         raise HTTPException(
@@ -78,8 +92,7 @@ async def create_agent_entry(
         "bot_user_id": request.bot_user_id,
         "name": request.name,
         "nickname": request.nickname,
-        "api_base": str(request.api_base),
-        "api_key": request.api_key,
+        "provider": request.provider,
         "model": request.model,
         "system_prompt": request.system_prompt,
         "memory_size": request.memory_size,
@@ -104,14 +117,17 @@ async def create_agent_entry(
             retriever = rag_store.as_retriever(settings.rag_top_k)
 
         config = LLMConfig(
-            api_base=str(request.api_base),
-            api_key=request.api_key,
+            agent_id=request.bot_user_id,
+            agent_name=request.name,
+            api_base=provider_config.api_base,
+            api_key=provider_config.api_key,
             model=request.model,
             system_prompt=request.system_prompt,
             memory_size=request.memory_size,
             redis_url=redis_url,
             tools=selected_tools,
             retriever=retriever,
+            agent_user_prefix=settings.agent_user_prefix,
         )
         service = LLMAgentService(config)
         agent_services[request.bot_user_id] = service

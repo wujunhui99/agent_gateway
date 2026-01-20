@@ -23,6 +23,8 @@ class RAGStore:
         embedding_model: str,
         embedding_api_key: Optional[str] = None,
         embedding_api_base: Optional[str] = None,
+        embedding_dimension: Optional[int] = None,
+        qdrant_url: Optional[str] = None,
         chunk_size: int = 800,
         chunk_overlap: int = 80,
         collection_name: str = "agent_gateway_rag",
@@ -44,28 +46,31 @@ class RAGStore:
         self._search_type = search_type
         self._fetch_k = fetch_k
         self._mmr_lambda = mmr_lambda
-        db_path = Path(self._persist_directory)
-        db_path.mkdir(parents=True, exist_ok=True)
-        self._qdrant_client = QdrantClient(path=str(db_path))
+
+        # Use Qdrant server if URL is provided, otherwise use local storage
+        if qdrant_url:
+            self._qdrant_client = QdrantClient(url=qdrant_url)
+        else:
+            db_path = Path(self._persist_directory)
+            db_path.mkdir(parents=True, exist_ok=True)
+            self._qdrant_client = QdrantClient(path=str(db_path))
 
         # Check if collection exists, create it if not
         try:
             self._qdrant_client.get_collection(collection_name=self._collection_name)
         except (ValueError, Exception):
+            if not embedding_dimension:
+                raise ValueError("embedding_dimension is required to create a new collection")
             # Collection doesn't exist, create it
-            # Get embedding dimension by creating a test embedding
-            test_embedding = self._embedding.embed_query("test")
-            vector_size = len(test_embedding)
-
             self._qdrant_client.create_collection(
                 collection_name=self._collection_name,
-                vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
+                vectors_config=VectorParams(size=embedding_dimension, distance=Distance.COSINE),
             )
 
-        self._vectorstore = QdrantVectorStore.from_existing_collection(
-            embedding=self._embedding,
-            collection_name=self._collection_name,
+        self._vectorstore = QdrantVectorStore(
             client=self._qdrant_client,
+            collection_name=self._collection_name,
+            embedding=self._embedding,
         )
 
     @staticmethod

@@ -73,6 +73,35 @@ class OpenIMClient:
                 f"openIM send_msg failed: {data.get('errCode')} {data.get('errMsg')}"
             )
 
+    async def send_group_text_reply(self, group_id: str, agent_id: str, content: str) -> None:
+        """Send a text message to a group chat."""
+        token = await self.ensure_token()
+        headers = {
+            "operationID": uuid.uuid4().hex,
+            "token": token,
+        }
+        profile = await self._get_user_profile(agent_id)
+        payload = {
+            "groupID": group_id,
+            "sendID": agent_id,
+            "content": {"content": content},
+            "contentType": 101,
+            "sessionType": 3,  # 3 = group chat
+            "senderNickname": profile.get("nickname"),
+            "senderFaceURL": profile.get("faceURL"),
+        }
+        resp = await self._http.post(
+            f"{self._settings.api_base_str}/msg/send_msg",
+            json=payload,
+            headers=headers,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("errCode") != 0:
+            raise RuntimeError(
+                f"openIM send_group_msg failed: {data.get('errCode')} {data.get('errMsg')}"
+            )
+
     async def mark_message_as_read(self, agent_id: str, conversation_id: str, seq: int) -> None:
         token = await self.ensure_token()
         headers = {
@@ -156,6 +185,65 @@ class OpenIMClient:
             raise RuntimeError(
                 f"openIM import_friend failed: {data.get('errCode')} {data.get('errMsg')}"
             )
+
+    async def accept_friend_request(self, from_user_id: str, to_user_id: str) -> None:
+        """Accept a friend request by auto-adding friendship."""
+        # For bot accounts, automatically establish friendship when friend request is received
+        await self.import_friendships(to_user_id, [from_user_id])
+        await self.import_friendships(from_user_id, [to_user_id])
+
+    async def get_group_message_history(
+        self,
+        group_id: str,
+        user_id: str,
+        count: int = 20
+    ) -> list[dict]:
+        """Get recent group chat messages.
+
+        Returns a list of message dicts with keys:
+        - sendID: sender user ID
+        - senderNickname: sender display name
+        - content: message content (JSON string for text messages)
+        - contentType: message type (101=text)
+        - sendTime: timestamp
+        """
+        token = await self.ensure_token()
+        headers = {
+            "operationID": uuid.uuid4().hex,
+            "token": token,
+        }
+        # Use sg_ prefix for group conversation ID
+        conversation_id = f"sg_{group_id}"
+
+        # Try to get messages using search_msgs API
+        payload = {
+            "conversationID": conversation_id,
+            "pagination": {
+                "pageNumber": 1,
+                "showNumber": count,
+            },
+            "sendUserID": "",  # Empty to get all users
+        }
+
+        try:
+            resp = await self._http.post(
+                f"{self._settings.api_base_str}/msg/search_msgs",
+                json=payload,
+                headers=headers,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            if data.get("errCode") == 0:
+                messages = data.get("data", {}).get("chatLogs", [])
+                # Return messages in chronological order (oldest first)
+                return list(reversed(messages)) if messages else []
+        except Exception as e:
+            logging.warning("search_msgs failed: %s", e)
+
+        # Fallback: return empty list if API fails
+        logging.info("Could not fetch group history for group %s", group_id)
+        return []
 
     async def _get_user_profile(self, user_id: str) -> dict[str, str]:
         cached = self._profile_cache.get(user_id)

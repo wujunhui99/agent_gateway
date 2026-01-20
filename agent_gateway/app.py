@@ -7,17 +7,17 @@ from pathlib import Path
 from typing import Any, Dict, Optional, List
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from pymongo import MongoClient
 from pydantic import AnyHttpUrl, BaseModel, Field
 from starlette.status import HTTP_400_BAD_REQUEST
-from langchain_core.tools import StructuredTool
+from langchain_core.tools import BaseTool
 
 from .config import Settings, load_settings
 from .openim import OpenIMClient
-from .llm_agent import LLMConfig, LLMAgentService
+from .llm_agent import ChatMetadata, LLMConfig, LLMAgentService
 from .services import create_agent_entry
-from .tools import build_agent_tools
+from .tools import build_agent_tools, reset_current_request_user, set_current_request_user
 from .rag import RAGStore
 
 TEXT_CONTENT_TYPES = {101, 106, 117}
@@ -31,6 +31,15 @@ class CommonCallbackFields(BaseModel):
     sessionType: int | None = None
     ex: str | None = None
     seq: Optional[int] = None
+    sendTime: Optional[int] = None
+    senderNickname: str | None = None
+    senderFaceURL: str | None = Field(default=None, alias="faceURL")
+    clientMsgID: str | None = None
+    serverMsgID: str | None = None
+    senderPlatformID: int | None = None
+    msgFrom: int | None = None
+    status: int | None = None
+    createTime: int | None = None
 
 
 class AfterSendSingleMsgRequest(CommonCallbackFields):
@@ -53,8 +62,7 @@ class CallbackResponse(BaseModel):
 class CreateAgentRequest(BaseModel):
     bot_user_id: str
     name: str
-    api_base: AnyHttpUrl
-    api_key: str
+    provider: str
     model: str
     system_prompt: str = "You are a helpful assistant."
     memory_size: int = Field(default=10, ge=0)
@@ -94,6 +102,14 @@ def get_settings() -> Settings:
 
 
 def build_app(settings: Settings) -> FastAPI:
+    # Lazy imports to speed up module loading
+    from langchain_core.messages import AIMessage, HumanMessage
+    from .openim import OpenIMClient
+    from .llm_agent import ChatMetadata, LLMConfig, LLMAgentService
+    from .services import create_agent_entry
+    from .tools import build_agent_tools, reset_current_request_user, set_current_request_user
+    from .rag import RAGStore
+
     app = FastAPI(title="Agent Gateway", version="0.1.0")
     client = OpenIMClient(settings)
     mongo_client = MongoClient(settings.mongo_uri)
@@ -106,8 +122,10 @@ def build_app(settings: Settings) -> FastAPI:
         rag_store = RAGStore(
             persist_directory=settings.rag_persist_directory,
             embedding_model=settings.rag_embedding_model,
+            embedding_dimension=settings.rag_embedding_dimension,
             embedding_api_key=embedding_key,
             embedding_api_base=settings.rag_embedding_api_base,
+            qdrant_url=settings.rag_qdrant_url,
             search_type=settings.rag_search_type,
             fetch_k=settings.rag_fetch_k,
             mmr_lambda=settings.rag_mmr_lambda,
@@ -130,9 +148,10 @@ def build_app(settings: Settings) -> FastAPI:
         settings,
         create_agent_fn=_create_agent,
         mcp_server_url=settings.mcp_server_url,
+        rag_store=rag_store,
     )
     agent_services = _load_agent_services(mongo_client, settings, agent_tools, rag_store)
-    print("agent services:", agent_services)
+    # print("agent services:", agent_services)
     app.state.mongo_client = mongo_client
     app.state.agent_services = agent_services
     app.state.agent_tools = agent_tools
@@ -151,6 +170,11 @@ def build_app(settings: Settings) -> FastAPI:
             rag_store=app.state.rag_store,
         )
         return JSONResponse(content=result)
+
+    @app.get("/documents/upload", response_class=HTMLResponse)
+    async def upload_document_page() -> HTMLResponse:
+        template_path = Path(__file__).parent / "templates" / "upload_document.html"
+        return HTMLResponse(content=template_path.read_text(), status_code=200)
 
     @app.post("/documents/upload")
     async def upload_document(file: UploadFile = File(...)) -> JSONResponse:
@@ -175,23 +199,9 @@ def build_app(settings: Settings) -> FastAPI:
         payload = {"filename": file.filename, **result}
         return JSONResponse(content=payload)
 
-    @app.get("/agents/new", response_class=HTMLResponse)
-    async def create_agent_form() -> HTMLResponse:
-        """Render the agent creation form with available tools."""
-        from pathlib import Path
-
-        tool_names = sorted(app.state.agent_tools.keys())
-        tools_markup = "\n".join(
-            f'<label class="checkbox"><input type="checkbox" name="allowed_tools" value="{name}" checked /> {name}</label>'
-            for name in tool_names
-        ) or '<div class="hint">No tools available.</div>'
-
-        # Load HTML template from file
-        template_path = Path(__file__).parent / "templates" / "create_agent.html"
-        html = template_path.read_text(encoding="utf-8")
-        html = html.replace("{{TOOLS}}", tools_markup)
-
-        return HTMLResponse(content=html)
+    @app.get("/health")
+    async def healthcheck() -> JSONResponse:
+        return JSONResponse(content={"status": "ok"})
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
@@ -227,10 +237,19 @@ def build_app(settings: Settings) -> FastAPI:
         service = app.state.agent_services.get(body.recvID)
         if service:
             session_key = f"{body.recvID}:{body.sendID}:p"
+            metadata = ChatMetadata(
+                sender_id=body.sendID,
+                sender_name=body.senderNickname or body.sendID,
+                is_group=False,
+                sender_is_agent=_is_agent_user(body.sendID, settings.agent_user_prefix),
+            )
             try:
-                reply = await asyncio.to_thread(service.generate_reply, session_key, text)
+                token = set_current_request_user(body.sendID)
+                reply = await asyncio.to_thread(service.generate_reply, session_key, text, metadata)
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+            finally:
+                reset_current_request_user(token)
 
             if reply:
                 try:
@@ -252,16 +271,26 @@ def build_app(settings: Settings) -> FastAPI:
         if settings.agent_user_prefix is None:
             return JSONResponse(content=CallbackResponse().dict())
 
-        at_list = body.atUserList or []
-        target_ids = [uid for uid in at_list if uid.startswith(settings.agent_user_prefix)]
-        if not target_ids:
-            return JSONResponse(content=CallbackResponse().dict())
-
         if body.contentType not in TEXT_CONTENT_TYPES:
             return JSONResponse(content=CallbackResponse().dict())
 
         extracted = _extract_text(body.content)
         if extracted is None:
+            return JSONResponse(content=CallbackResponse().dict())
+
+        at_list = body.atUserList or []
+        target_ids = [uid for uid in at_list if uid.startswith(settings.agent_user_prefix)]
+
+        # Record passive history so later @mentions see prior group context.
+        _record_passive_group_context(
+            body=body,
+            message_text=extracted,
+            target_ids=target_ids,
+            agent_services=app.state.agent_services,
+            agent_user_prefix=settings.agent_user_prefix,
+        )
+
+        if not target_ids:
             return JSONResponse(content=CallbackResponse().dict())
 
         async def send_group_message(bot_id: str, message: str) -> None:
@@ -273,19 +302,26 @@ def build_app(settings: Settings) -> FastAPI:
 
         tasks = []
         for bot_id in target_ids:
-            text = extracted
-            if body.atUserList:
-                text = text.replace(f"@{bot_id}", "", 1).strip()
+            text = extracted.replace(f"@{bot_id}", "", 1).strip() if body.atUserList else extracted
             if not text:
                 continue
 
             service = app.state.agent_services.get(bot_id)
             if service:
                 session_key = f"{bot_id}:{body.groupID}:g"
+                metadata = ChatMetadata(
+                    sender_id=body.sendID,
+                    sender_name=body.senderNickname or body.sendID,
+                    is_group=True,
+                    sender_is_agent=_is_agent_user(body.sendID, settings.agent_user_prefix),
+                )
                 try:
-                    reply = await asyncio.to_thread(service.generate_reply, session_key, text)
+                    token = set_current_request_user(body.sendID)
+                    reply = await asyncio.to_thread(service.generate_reply, session_key, text, metadata)
                 except Exception as exc:  # noqa: BLE001
                     raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+                finally:
+                    reset_current_request_user(token)
                 if not reply:
                     continue
                 tasks.append(send_group_message(bot_id, reply))
@@ -319,9 +355,9 @@ def build_app(settings: Settings) -> FastAPI:
 def _load_agent_services(
     mongo_client: MongoClient,
     settings: Settings,
-    available_tools: Dict[str, StructuredTool],
-    rag_store: Optional[RAGStore],
-) -> Dict[str, LLMAgentService]:
+    available_tools: Dict[str, BaseTool],
+    rag_store: Optional["RAGStore"],
+) -> Dict[str, "LLMAgentService"]:
     services: Dict[str, LLMAgentService] = {}
     db = mongo_client[settings.mongo_database]
     collection = db[settings.mongo_agent_collection]
@@ -334,11 +370,16 @@ def _load_agent_services(
 
     for doc in docs:
         bot_user_id = doc.get("bot_user_id") or doc.get("botId") or doc.get("bot_userID")
-        api_base = doc.get("api_base")
-        api_key = doc.get("api_key")
+        provider = doc.get("provider")
         model = doc.get("model")
-        if not bot_user_id or not api_base or not api_key or not model:
+        if not bot_user_id or not provider or not model:
             logging.warning("Skip agent doc missing required fields: %s", doc)
+            continue
+
+        # Get provider configuration
+        provider_config = settings.get_llm_provider(provider)
+        if not provider_config:
+            logging.warning("Skip agent %s: unknown provider '%s'", bot_user_id, provider)
             continue
 
         system_prompt = doc.get("system_prompt") or "You are a helpful assistant."
@@ -347,7 +388,7 @@ def _load_agent_services(
 
         allowed_names = doc.get("allowed_tools")
         if isinstance(allowed_names, list):
-            selected_tools: List[StructuredTool] = []
+            selected_tools: List[BaseTool] = []
             for name in allowed_names:
                 tool = available_tools.get(name)
                 if tool:
@@ -365,14 +406,17 @@ def _load_agent_services(
                 logging.warning("Failed to create retriever for %s: %s", bot_user_id, exc)
 
         config = LLMConfig(
-            api_base=api_base,
-            api_key=api_key,
+            agent_id=bot_user_id,
+            agent_name=doc.get("name") or bot_user_id,
+            api_base=provider_config.api_base,
+            api_key=provider_config.api_key,
             model=model,
             system_prompt=system_prompt,
             memory_size=memory_size,
             redis_url=redis_url,
             tools=selected_tools,
             retriever=retriever,
+            agent_user_prefix=settings.agent_user_prefix,
         )
         services[bot_user_id] = LLMAgentService(config)
 
@@ -391,10 +435,48 @@ def _extract_text(content: str) -> Optional[str]:
     return None
 
 
+def _is_agent_user(user_id: str, prefix: str | None) -> bool:
+    if not prefix:
+        return False
+    return user_id.startswith(prefix)
+
+
+def _record_passive_group_context(
+    *,
+    body: AfterSendGroupMsgRequest,
+    message_text: str,
+    target_ids: list[str],
+    agent_services: Dict[str, LLMAgentService],
+    agent_user_prefix: str | None,
+) -> None:
+    """Store recent group messages for non-mentioned agents to preserve context."""
+    if not agent_user_prefix:
+        return
+
+    for bot_id, service in agent_services.items():
+        if bot_id in target_ids:
+            # Targeted agents will add this message through generate_reply.
+            continue
+        if bot_id == body.sendID:
+            continue
+
+        text = message_text.replace(f"@{bot_id}", "").strip()
+        if not text:
+            continue
+
+        metadata = ChatMetadata(
+            sender_id=body.sendID,
+            sender_name=body.senderNickname or body.sendID,
+            is_group=True,
+            sender_is_agent=_is_agent_user(body.sendID, agent_user_prefix),
+        )
+        session_key = f"{bot_id}:{body.groupID}:g"
+        try:
+            service.record_passive_message(session_key, text, metadata)
+        except Exception as exc:  # noqa: BLE001
+            logging.warning("Failed to record passive group message for %s: %s", bot_id, exc)
+
+
 def _build_single_conversation_id(user_a: str, user_b: str) -> str:
     ordered = sorted([user_a, user_b])
     return "si_" + "_".join(ordered)
-
-
-settings = get_settings()
-app = build_app(settings)
