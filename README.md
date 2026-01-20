@@ -38,10 +38,10 @@ Agent Gateway 是一个基于 FastAPI 构建的智能代理网关服务，旨在
 ### 1. 环境准备
 
 确保你已经安装了以下依赖服务：
-*   OpenIM Server
+*   OpenIM Server (https://github.com/openimsdk)
 *   MongoDB
-*   Redis (可选)
-*   Qdrant (如果启用 RAG)
+*   Redis
+*   Qdrant
 
 ### 2. 安装依赖
 
